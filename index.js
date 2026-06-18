@@ -16,7 +16,8 @@ app.use(
     origin: [process.env.CLIENT_URL],
   }),
 );
-app.use(express.json());
+app.use(express.json({ limit: "50mb" }));
+app.use(express.urlencoded({ limit: "50mb", extended: true }));
 
 const client = new MongoClient(uri, {
   serverApi: {
@@ -29,7 +30,17 @@ const client = new MongoClient(uri, {
 async function run() {
   try {
     await client.connect();
+
+
     const db = client.db("art-verse");
+    const artworksCollection = db.collection("artworks")
+
+
+    app.post("/api/artworks", async (req, res) => {
+        const artwork = req.body;
+        const result = await artworksCollection.insertOne(artwork);
+        res.send(result)
+    })
 
  
 
