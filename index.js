@@ -1,4 +1,3 @@
-
 const express = require("express");
 const dontenv = require("dotenv");
 const cors = require("cors");
@@ -31,30 +30,33 @@ async function run() {
   try {
     await client.connect();
 
-
     const db = client.db("art-verse");
-    const artworksCollection = db.collection("artworks")
-
+    const artworksCollection = db.collection("artworks");
 
     app.post("/api/artworks", async (req, res) => {
-        const artwork = req.body;
-        const result = await artworksCollection.insertOne(artwork);
-        res.send(result)
-    })
+      const artwork = req.body;
+      const result = await artworksCollection.insertOne(artwork);
+      res.send(result);
+    });
 
     app.get("/api/artworks", async (req, res) => {
-        const result = await artworksCollection.find().toArray();
-        res.send(result);
-    })
+      const result = await artworksCollection.find().toArray();
+      res.send(result);
+    });
 
     app.get("/api/artworks/:id", async (req, res) => {
-        const id = req.params.id;
-        const query = { _id: new ObjectId(id) };
-        const result = await artworksCollection.findOne(query);
-        res.send(result);
-    })
+      const id = req.params.id;
+      const query = { _id: new ObjectId(id) };
+      const result = await artworksCollection.findOne(query);
+      res.send(result);
+    });
 
- 
+    app.delete("/api/artworks/:id", async (req, res) => {
+      const id = req.params.id;
+      const query = { _id: new ObjectId(id) };
+      const result = await artworksCollection.deleteOne(query);
+      res.send(result);
+    });
 
     await client.db("admin").command({ ping: 1 });
     console.log(
