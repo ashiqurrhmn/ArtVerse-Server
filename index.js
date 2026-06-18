@@ -69,6 +69,26 @@ async function run() {
       res.send(result);
     });
 
+    // ── Profiles ──
+    const profilesCollection = db.collection("profiles");
+
+    app.get("/api/profiles/:email", async (req, res) => {
+      const email = req.params.email;
+      const result = await profilesCollection.findOne({ email });
+      res.send(result || {});
+    });
+
+    app.put("/api/profiles/:email", async (req, res) => {
+      const email = req.params.email;
+      const profileData = req.body;
+      const result = await profilesCollection.updateOne(
+        { email },
+        { $set: { ...profileData, email, updatedAt: new Date() } },
+        { upsert: true }
+      );
+      res.send(result);
+    });
+
     await client.db("admin").command({ ping: 1 });
     console.log(
       "Pinged your deployment. You successfully connected to MongoDB!",
