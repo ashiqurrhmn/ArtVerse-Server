@@ -40,15 +40,78 @@ async function run() {
     });
 
     app.get("/api/artworks", async (req, res) => {
-      const result = await artworksCollection.find().toArray();
+      const result = await artworksCollection.aggregate([
+        {
+          $lookup: {
+            from: "profiles",
+            localField: "email",
+            foreignField: "email",
+            as: "artistProfile"
+          }
+        },
+        {
+          $addFields: {
+            userName: {
+              $cond: {
+                if: { 
+                  $and: [
+                    { $gt: [{ $size: "$artistProfile" }, 0] },
+                    { $ne: [{ $arrayElemAt: ["$artistProfile.name", 0] }, null] },
+                    { $ne: [{ $arrayElemAt: ["$artistProfile.name", 0] }, ""] }
+                  ]
+                },
+                then: { $arrayElemAt: ["$artistProfile.name", 0] },
+                else: "$userName"
+              }
+            }
+          }
+        },
+        {
+          $project: {
+            artistProfile: 0
+          }
+        }
+      ]).toArray();
       res.send(result);
     });
 
     app.get("/api/artworks/:id", async (req, res) => {
       const id = req.params.id;
       const query = { _id: new ObjectId(id) };
-      const result = await artworksCollection.findOne(query);
-      res.send(result);
+      const result = await artworksCollection.aggregate([
+        { $match: query },
+        {
+          $lookup: {
+            from: "profiles",
+            localField: "email",
+            foreignField: "email",
+            as: "artistProfile"
+          }
+        },
+        {
+          $addFields: {
+            userName: {
+              $cond: {
+                if: { 
+                  $and: [
+                    { $gt: [{ $size: "$artistProfile" }, 0] },
+                    { $ne: [{ $arrayElemAt: ["$artistProfile.name", 0] }, null] },
+                    { $ne: [{ $arrayElemAt: ["$artistProfile.name", 0] }, ""] }
+                  ]
+                },
+                then: { $arrayElemAt: ["$artistProfile.name", 0] },
+                else: "$userName"
+              }
+            }
+          }
+        },
+        {
+          $project: {
+            artistProfile: 0
+          }
+        }
+      ]).toArray();
+      res.send(result[0] || null);
     });
 
     app.delete("/api/artworks/:id", async (req, res) => {
