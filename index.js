@@ -47,6 +47,13 @@ async function run() {
         res.send(result);
     })
 
+    app.get("/api/artworks/:id", async (req, res) => {
+        const id = req.params.id;
+        const query = { _id: new ObjectId(id) };
+        const result = await artworksCollection.findOne(query);
+        res.send(result);
+    })
+
  
 
     await client.db("admin").command({ ping: 1 });
