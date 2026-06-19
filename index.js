@@ -305,6 +305,19 @@ async function run() {
       try {
         const { title, image, price, _id, buyerEmail } = req.body;
 
+        if (buyerEmail) {
+          const buyer = await db.collection("user").findOne({ email: buyerEmail });
+          const plan = buyer?.plan || "free";
+          const purchaseCount = await db.collection("purchases").countDocuments({ buyerEmail });
+
+          if (plan === "free" && purchaseCount >= 3) {
+            return res.status(403).send({ error: "Free plan allows max 3 artwork purchases. Please upgrade to Pro." });
+          }
+          if (plan === "pro" && purchaseCount >= 9) {
+            return res.status(403).send({ error: "Pro plan allows max 9 artwork purchases. Please upgrade to Premium." });
+          }
+        }
+
         const session = await stripe.checkout.sessions.create({
           customer_email: buyerEmail,
 
@@ -466,6 +479,27 @@ async function run() {
         });
       } catch (error) {
         res.send({ sold: false });
+      }
+    });
+
+    // Get purchase stats for a buyer
+    app.get("/api/purchases/stats/:email", async (req, res) => {
+      try {
+        const email = req.params.email;
+        if (!email) {
+          return res.status(400).send({ error: "Email is required" });
+        }
+        const buyer = await usersCollection.findOne({ email });
+        const plan = buyer?.plan || "free";
+        const count = await purchasesCollection.countDocuments({ buyerEmail: email });
+        
+        let limit = 3;
+        if (plan === "pro") limit = 9;
+        if (plan === "premium") limit = -1; // unlimited
+
+        res.send({ plan, count, limit });
+      } catch (error) {
+        res.status(500).send({ error: "Failed to fetch stats" });
       }
     });
 
