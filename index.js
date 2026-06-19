@@ -174,6 +174,12 @@ async function run() {
           { email },
           { $set: { name: profileData.name } }
         );
+        
+        // Also update the artist's name in their artworks
+        await db.collection("artworks").updateMany(
+          { email },
+          { $set: { userName: profileData.name } }
+        );
       }
 
       res.send(result);
@@ -433,6 +439,7 @@ async function run() {
                     title: artwork.title,
                     image: artwork.image,
                     userName: artwork.userName,
+                    userEmail: artwork.email,
                     category: artwork.category,
                   }
                 : null,
