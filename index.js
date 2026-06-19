@@ -48,28 +48,30 @@ async function run() {
       const { email } = req.query;
       const matchStage = email ? { $match: { email } } : { $match: {} };
 
-      const result = await artworksCollection.aggregate([
-        matchStage,
-        {
-          $lookup: {
-            from: "profiles",
-            localField: "email",
-            foreignField: "email",
-            as: "artistProfile"
-          }
-        },
-        {
-          $addFields: {
-            userName: { $arrayElemAt: ["$artistProfile.name", 0] },
-            artistImage: { $arrayElemAt: ["$artistProfile.profileImage", 0] }
-          }
-        },
-        {
-          $project: {
-            artistProfile: 0
-          }
-        }
-      ]).toArray();
+      const result = await artworksCollection
+        .aggregate([
+          matchStage,
+          {
+            $lookup: {
+              from: "profiles",
+              localField: "email",
+              foreignField: "email",
+              as: "artistProfile",
+            },
+          },
+          {
+            $addFields: {
+              userName: { $arrayElemAt: ["$artistProfile.name", 0] },
+              artistImage: { $arrayElemAt: ["$artistProfile.profileImage", 0] },
+            },
+          },
+          {
+            $project: {
+              artistProfile: 0,
+            },
+          },
+        ])
+        .toArray();
       res.send(result);
     });
 
@@ -77,28 +79,30 @@ async function run() {
     app.get("/api/artworks/:id", async (req, res) => {
       const id = req.params.id;
       const query = { _id: new ObjectId(id) };
-      const result = await artworksCollection.aggregate([
-        { $match: query },
-        {
-          $lookup: {
-            from: "profiles",
-            localField: "email",
-            foreignField: "email",
-            as: "artistProfile"
-          }
-        },
-        {
-          $addFields: {
-            userName: { $arrayElemAt: ["$artistProfile.name", 0] },
-            artistImage: { $arrayElemAt: ["$artistProfile.profileImage", 0] }
-          }
-        },
-        {
-          $project: {
-            artistProfile: 0
-          }
-        }
-      ]).toArray();
+      const result = await artworksCollection
+        .aggregate([
+          { $match: query },
+          {
+            $lookup: {
+              from: "profiles",
+              localField: "email",
+              foreignField: "email",
+              as: "artistProfile",
+            },
+          },
+          {
+            $addFields: {
+              userName: { $arrayElemAt: ["$artistProfile.name", 0] },
+              artistImage: { $arrayElemAt: ["$artistProfile.profileImage", 0] },
+            },
+          },
+          {
+            $project: {
+              artistProfile: 0,
+            },
+          },
+        ])
+        .toArray();
       res.send(result[0] || null);
     });
 
@@ -129,26 +133,28 @@ async function run() {
     app.get("/api/profiles/:email", async (req, res) => {
       const email = req.params.email;
       const result = await profilesCollection.findOne({ email });
-      
+
       if (result && result.followers && result.followers.length > 0) {
-        const followerEmails = result.followers.map(f => f.email);
+        const followerEmails = result.followers.map((f) => f.email);
         // Fetch live profiles for all followers
-        const liveProfiles = await profilesCollection.find({ email: { $in: followerEmails } }).toArray();
-        
+        const liveProfiles = await profilesCollection
+          .find({ email: { $in: followerEmails } })
+          .toArray();
+
         // Enrich the followers array with live name and profileImage
-        result.followers = result.followers.map(f => {
-          const liveProfile = liveProfiles.find(p => p.email === f.email);
+        result.followers = result.followers.map((f) => {
+          const liveProfile = liveProfiles.find((p) => p.email === f.email);
           if (liveProfile) {
             return {
               ...f,
               name: liveProfile.name || f.name,
-              image: liveProfile.profileImage || f.image
+              image: liveProfile.profileImage || f.image,
             };
           }
           return f;
         });
       }
-      
+
       res.send(result || {});
     });
 
@@ -159,41 +165,52 @@ async function run() {
       const result = await profilesCollection.updateOne(
         { email },
         { $set: { ...profileData, email, updatedAt: new Date() } },
-        { upsert: true }
+        { upsert: true },
       );
+
+      // If name is updated, also update it in the user collection
+      if (profileData.name) {
+        await db.collection("user").updateOne(
+          { email },
+          { $set: { name: profileData.name } }
+        );
+      }
+
       res.send(result);
     });
 
     // Toggle follow/unfollow status for a specific artist's profile
     app.post("/api/profiles/:email/follow", async (req, res) => {
       const artistEmail = req.params.email;
-      const followerData = req.body; 
+      const followerData = req.body;
 
       if (!followerData.email) {
         return res.status(400).send({ error: "Follower email is required" });
       }
 
       const profile = await profilesCollection.findOne({ email: artistEmail });
-      
+
       // Ensure profile exists
       if (!profile) {
         return res.status(404).send({ error: "Profile not found" });
       }
 
-      const isFollowing = profile.followers?.some((f) => f.email === followerData.email);
+      const isFollowing = profile.followers?.some(
+        (f) => f.email === followerData.email,
+      );
 
       let result;
       if (isFollowing) {
         // Unfollow
         result = await profilesCollection.updateOne(
           { email: artistEmail },
-          { $pull: { followers: { email: followerData.email } } }
+          { $pull: { followers: { email: followerData.email } } },
         );
       } else {
         // Follow
         result = await profilesCollection.updateOne(
           { email: artistEmail },
-          { $addToSet: { followers: followerData } }
+          { $addToSet: { followers: followerData } },
         );
       }
 
@@ -206,27 +223,31 @@ async function run() {
     // Get all users
     app.get("/api/users", async (req, res) => {
       try {
-        const result = await usersCollection.aggregate([
-          {
-            $lookup: {
-              from: "profiles",
-              localField: "email",
-              foreignField: "email",
-              as: "userProfile"
-            }
-          },
-          {
-            $addFields: {
-              profileName: { $arrayElemAt: ["$userProfile.name", 0] },
-              profileImage: { $arrayElemAt: ["$userProfile.profileImage", 0] }
-            }
-          },
-          {
-            $project: {
-              userProfile: 0
-            }
-          }
-        ]).toArray();
+        const result = await usersCollection
+          .aggregate([
+            {
+              $lookup: {
+                from: "profiles",
+                localField: "email",
+                foreignField: "email",
+                as: "userProfile",
+              },
+            },
+            {
+              $addFields: {
+                profileName: { $arrayElemAt: ["$userProfile.name", 0] },
+                profileImage: {
+                  $arrayElemAt: ["$userProfile.profileImage", 0],
+                },
+              },
+            },
+            {
+              $project: {
+                userProfile: 0,
+              },
+            },
+          ])
+          .toArray();
         res.send(result);
       } catch (error) {
         res.status(500).send({ error: "Failed to fetch users" });
@@ -237,19 +258,19 @@ async function run() {
     app.patch("/api/users/:id/role", async (req, res) => {
       const id = req.params.id;
       const { role } = req.body;
-      
+
       try {
         // better-auth often uses string _id
         let result = await usersCollection.updateOne(
           { _id: id },
-          { $set: { role: role } }
+          { $set: { role: role } },
         );
-        
+
         if (result.matchedCount === 0) {
           // Fallback to ObjectId just in case
           result = await usersCollection.updateOne(
             { _id: new ObjectId(id) },
-            { $set: { role: role } }
+            { $set: { role: role } },
           );
         }
         res.send(result);
@@ -261,7 +282,7 @@ async function run() {
     // Delete a user
     app.delete("/api/users/:id", async (req, res) => {
       const id = req.params.id;
-      
+
       try {
         let result = await usersCollection.deleteOne({ _id: id });
         if (result.deletedCount === 0) {
@@ -273,7 +294,6 @@ async function run() {
       }
     });
 
-
     //stripe
     app.post("/create-checkout-session", async (req, res) => {
       try {
@@ -281,7 +301,7 @@ async function run() {
 
         const session = await stripe.checkout.sessions.create({
           customer_email: buyerEmail,
-          
+
           payment_method_types: ["card"],
           line_items: [
             {
@@ -324,9 +344,15 @@ async function run() {
         }
 
         // Check if this session was already processed
-        const existing = await purchasesCollection.findOne({ stripeSessionId: session_id });
+        const existing = await purchasesCollection.findOne({
+          stripeSessionId: session_id,
+        });
         if (existing) {
-          return res.send({ success: true, purchase: existing, alreadyProcessed: true });
+          return res.send({
+            success: true,
+            purchase: existing,
+            alreadyProcessed: true,
+          });
         }
 
         const session = await stripe.checkout.sessions.retrieve(session_id);
@@ -337,7 +363,9 @@ async function run() {
           const artworkTitle = session.metadata?.artworkTitle;
 
           if (!artworkId) {
-            return res.status(400).send({ error: "Missing artwork ID in session" });
+            return res
+              .status(400)
+              .send({ error: "Missing artwork ID in session" });
           }
 
           // Create purchase record
@@ -356,7 +384,13 @@ async function run() {
           // Mark artwork as sold
           await artworksCollection.updateOne(
             { _id: new ObjectId(artworkId) },
-            { $set: { sold: true, buyerEmail: purchase.buyerEmail, soldAt: new Date() } }
+            {
+              $set: {
+                sold: true,
+                buyerEmail: purchase.buyerEmail,
+                soldAt: new Date(),
+              },
+            },
           );
 
           return res.send({ success: true, purchase });
@@ -386,15 +420,24 @@ async function run() {
           purchases.map(async (p) => {
             let artwork = null;
             try {
-              artwork = await artworksCollection.findOne({ _id: new ObjectId(p.artworkId) });
-            } catch (e) { /* ignore */ }
+              artwork = await artworksCollection.findOne({
+                _id: new ObjectId(p.artworkId),
+              });
+            } catch (e) {
+              /* ignore */
+            }
             return {
               ...p,
               artwork: artwork
-                ? { title: artwork.title, image: artwork.image, userName: artwork.userName, category: artwork.category }
+                ? {
+                    title: artwork.title,
+                    image: artwork.image,
+                    userName: artwork.userName,
+                    category: artwork.category,
+                  }
                 : null,
             };
-          })
+          }),
         );
 
         res.send(enriched);
@@ -407,8 +450,13 @@ async function run() {
     app.get("/api/purchases/check/:artworkId", async (req, res) => {
       try {
         const { artworkId } = req.params;
-        const artwork = await artworksCollection.findOne({ _id: new ObjectId(artworkId) });
-        res.send({ sold: artwork?.sold === true, buyerEmail: artwork?.buyerEmail || null });
+        const artwork = await artworksCollection.findOne({
+          _id: new ObjectId(artworkId),
+        });
+        res.send({
+          sold: artwork?.sold === true,
+          buyerEmail: artwork?.buyerEmail || null,
+        });
       } catch (error) {
         res.send({ sold: false });
       }
