@@ -9,6 +9,9 @@ const uri = process.env.MONGODB_URI;
 const app = express();
 const PORT = process.env.PORT;
 
+const Stripe = require("stripe");
+const stripe = Stripe(process.env.STRIPE_SECRET_KEY);
+
 app.use(
   cors({
     credentials: true,
@@ -267,6 +270,147 @@ async function run() {
         res.send(result);
       } catch (error) {
         res.status(500).send({ error: "Failed to delete user" });
+      }
+    });
+
+
+    //stripe
+    app.post("/create-checkout-session", async (req, res) => {
+      try {
+        const { title, image, price, _id, buyerEmail } = req.body;
+
+        const session = await stripe.checkout.sessions.create({
+          customer_email: buyerEmail,
+          
+          payment_method_types: ["card"],
+          line_items: [
+            {
+              price_data: {
+                currency: "usd",
+                product_data: {
+                  name: title,
+                  images: image ? [image] : [],
+                },
+                unit_amount: Math.round(price * 100),
+              },
+              quantity: 1,
+            },
+          ],
+          metadata: {
+            artworkId: _id,
+            buyerEmail: buyerEmail || "",
+            artworkTitle: title,
+          },
+          mode: "payment",
+          success_url: `${process.env.CLIENT_URL}/payment-success?session_id={CHECKOUT_SESSION_ID}`,
+          cancel_url: `${process.env.CLIENT_URL}/artworks/${_id}`,
+        });
+
+        res.send({ url: session.url });
+      } catch (error) {
+        res.status(500).send({ message: error.message });
+      }
+    });
+
+    // ── Purchases ──
+    const purchasesCollection = db.collection("purchases");
+
+    // Verify a Stripe session and save the purchase
+    app.post("/api/purchases/verify", async (req, res) => {
+      try {
+        const { session_id } = req.body;
+        if (!session_id) {
+          return res.status(400).send({ error: "No session ID" });
+        }
+
+        // Check if this session was already processed
+        const existing = await purchasesCollection.findOne({ stripeSessionId: session_id });
+        if (existing) {
+          return res.send({ success: true, purchase: existing, alreadyProcessed: true });
+        }
+
+        const session = await stripe.checkout.sessions.retrieve(session_id);
+
+        if (session.payment_status === "paid") {
+          const artworkId = session.metadata?.artworkId;
+          const buyerEmail = session.metadata?.buyerEmail;
+          const artworkTitle = session.metadata?.artworkTitle;
+
+          if (!artworkId) {
+            return res.status(400).send({ error: "Missing artwork ID in session" });
+          }
+
+          // Create purchase record
+          const purchase = {
+            artworkId,
+            buyerEmail: buyerEmail || session.customer_email || "",
+            artworkTitle: artworkTitle || "",
+            amount: session.amount_total / 100,
+            currency: session.currency,
+            stripeSessionId: session_id,
+            purchasedAt: new Date(),
+          };
+
+          await purchasesCollection.insertOne(purchase);
+
+          // Mark artwork as sold
+          await artworksCollection.updateOne(
+            { _id: new ObjectId(artworkId) },
+            { $set: { sold: true, buyerEmail: purchase.buyerEmail, soldAt: new Date() } }
+          );
+
+          return res.send({ success: true, purchase });
+        }
+
+        res.send({ success: false, status: session.payment_status });
+      } catch (error) {
+        console.error("Purchase verify error:", error);
+        res.status(500).send({ error: error.message });
+      }
+    });
+
+    // Get purchases for a buyer
+    app.get("/api/purchases", async (req, res) => {
+      try {
+        const { email } = req.query;
+        if (!email) {
+          return res.status(400).send({ error: "Email is required" });
+        }
+        const purchases = await purchasesCollection
+          .find({ buyerEmail: email })
+          .sort({ purchasedAt: -1 })
+          .toArray();
+
+        // Enrich with artwork data
+        const enriched = await Promise.all(
+          purchases.map(async (p) => {
+            let artwork = null;
+            try {
+              artwork = await artworksCollection.findOne({ _id: new ObjectId(p.artworkId) });
+            } catch (e) { /* ignore */ }
+            return {
+              ...p,
+              artwork: artwork
+                ? { title: artwork.title, image: artwork.image, userName: artwork.userName, category: artwork.category }
+                : null,
+            };
+          })
+        );
+
+        res.send(enriched);
+      } catch (error) {
+        res.status(500).send({ error: "Failed to fetch purchases" });
+      }
+    });
+
+    // Check if an artwork is sold
+    app.get("/api/purchases/check/:artworkId", async (req, res) => {
+      try {
+        const { artworkId } = req.params;
+        const artwork = await artworksCollection.findOne({ _id: new ObjectId(artworkId) });
+        res.send({ sold: artwork?.sold === true, buyerEmail: artwork?.buyerEmail || null });
+      } catch (error) {
+        res.send({ sold: false });
       }
     });
 
