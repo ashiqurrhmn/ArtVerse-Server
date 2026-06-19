@@ -503,6 +503,64 @@ async function run() {
       }
     });
 
+    // ── Saved Artworks ──
+    const savedArtworksCollection = db.collection("savedArtworks");
+
+    // Toggle saved state of an artwork
+    app.post("/api/saved-artworks/toggle", async (req, res) => {
+      try {
+        const { email, artworkId } = req.body;
+        if (!email || !artworkId) {
+          return res.status(400).send({ error: "Email and artworkId are required" });
+        }
+
+        const existing = await savedArtworksCollection.findOne({ email, artworkId });
+        if (existing) {
+          await savedArtworksCollection.deleteOne({ _id: existing._id });
+          res.send({ saved: false });
+        } else {
+          await savedArtworksCollection.insertOne({ email, artworkId, savedAt: new Date() });
+          res.send({ saved: true });
+        }
+      } catch (error) {
+        res.status(500).send({ error: "Failed to toggle saved artwork" });
+      }
+    });
+
+    // Check if a specific artwork is saved by user
+    app.get("/api/saved-artworks/check/:email/:artworkId", async (req, res) => {
+      try {
+        const { email, artworkId } = req.params;
+        const existing = await savedArtworksCollection.findOne({ email, artworkId });
+        res.send({ saved: !!existing });
+      } catch (error) {
+        res.status(500).send({ error: "Failed to check saved status" });
+      }
+    });
+
+    // Get all saved artworks for a user
+    app.get("/api/saved-artworks/:email", async (req, res) => {
+      try {
+        const { email } = req.params;
+        const savedItems = await savedArtworksCollection.find({ email }).sort({ savedAt: -1 }).toArray();
+
+        const enriched = await Promise.all(
+          savedItems.map(async (item) => {
+            let artwork = null;
+            try {
+              artwork = await artworksCollection.findOne({ _id: new ObjectId(item.artworkId) });
+            } catch (e) {}
+            return artwork;
+          })
+        );
+        
+        // filter out nulls in case an artwork was deleted
+        res.send(enriched.filter(a => a !== null));
+      } catch (error) {
+        res.status(500).send({ error: "Failed to fetch saved artworks" });
+      }
+    });
+
     await client.db("admin").command({ ping: 1 });
     console.log(
       "Pinged your deployment. You successfully connected to MongoDB!",
