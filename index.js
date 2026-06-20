@@ -762,6 +762,132 @@ async function run() {
       }
     });
 
+    // ── Comments ──
+    const commentsCollection = db.collection("comments");
+
+    // Get all comments for an artwork (public)
+    app.get("/api/artworks/:id/comments", async (req, res) => {
+      try {
+        const artworkId = req.params.id;
+        const comments = await commentsCollection
+          .find({ artworkId })
+          .sort({ createdAt: -1 })
+          .toArray();
+
+        // Enrich with profile data
+        const enriched = await Promise.all(
+          comments.map(async (comment) => {
+            const profile = await profilesCollection.findOne({ email: comment.userId });
+            const userDoc = await usersCollection.findOne({ email: comment.userId });
+            return {
+              _id: comment._id,
+              artworkId: comment.artworkId,
+              userId: comment.userId,
+              comment: comment.comment,
+              createdAt: comment.createdAt,
+              updatedAt: comment.updatedAt || null,
+              userName: profile?.name || userDoc?.name || comment.userId.split("@")[0],
+              userAvatar: profile?.profileImage || userDoc?.image || null,
+            };
+          })
+        );
+        res.send(enriched);
+      } catch (error) {
+        console.error("Failed to fetch comments:", error);
+        res.status(500).send({ error: "Failed to fetch comments" });
+      }
+    });
+
+    // Post a comment (any logged-in user)
+    app.post("/api/artworks/:id/comments", async (req, res) => {
+      try {
+        const artworkId = req.params.id;
+        const { email, comment } = req.body;
+
+        if (!email || !comment || !comment.trim()) {
+          return res.status(400).send({ error: "Email and comment are required" });
+        }
+
+        const newComment = {
+          artworkId,
+          userId: email,
+          comment: comment.trim(),
+          createdAt: new Date(),
+        };
+
+        const result = await commentsCollection.insertOne(newComment);
+
+        // Return enriched comment
+        const profile = await profilesCollection.findOne({ email });
+        const userDoc = await usersCollection.findOne({ email });
+        res.send({
+          _id: result.insertedId,
+          ...newComment,
+          userName: profile?.name || userDoc?.name || email.split("@")[0],
+          userAvatar: profile?.profileImage || userDoc?.image || null,
+        });
+      } catch (error) {
+        console.error("Failed to post comment:", error);
+        res.status(500).send({ error: "Failed to post comment" });
+      }
+    });
+
+    // Edit a comment (only the original commenter)
+    app.patch("/api/comments/:commentId", async (req, res) => {
+      try {
+        const { commentId } = req.params;
+        const { email, comment } = req.body;
+
+        if (!email || !comment || !comment.trim()) {
+          return res.status(400).send({ error: "Email and comment are required" });
+        }
+
+        const existing = await commentsCollection.findOne({ _id: new ObjectId(commentId) });
+        if (!existing) {
+          return res.status(404).send({ error: "Comment not found" });
+        }
+        if (existing.userId !== email) {
+          return res.status(403).send({ error: "You can only edit your own comments" });
+        }
+
+        await commentsCollection.updateOne(
+          { _id: new ObjectId(commentId) },
+          { $set: { comment: comment.trim(), updatedAt: new Date() } }
+        );
+
+        res.send({ success: true });
+      } catch (error) {
+        console.error("Failed to edit comment:", error);
+        res.status(500).send({ error: "Failed to edit comment" });
+      }
+    });
+
+    // Delete a comment (only the original commenter)
+    app.delete("/api/comments/:commentId", async (req, res) => {
+      try {
+        const { commentId } = req.params;
+        const { email } = req.body;
+
+        if (!email) {
+          return res.status(400).send({ error: "Email is required" });
+        }
+
+        const existing = await commentsCollection.findOne({ _id: new ObjectId(commentId) });
+        if (!existing) {
+          return res.status(404).send({ error: "Comment not found" });
+        }
+        if (existing.userId !== email) {
+          return res.status(403).send({ error: "You can only delete your own comments" });
+        }
+
+        await commentsCollection.deleteOne({ _id: new ObjectId(commentId) });
+        res.send({ success: true });
+      } catch (error) {
+        console.error("Failed to delete comment:", error);
+        res.status(500).send({ error: "Failed to delete comment" });
+      }
+    });
+
     await client.db("admin").command({ ping: 1 });
     console.log(
       "Pinged your deployment. You successfully connected to MongoDB!",
