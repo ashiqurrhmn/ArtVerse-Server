@@ -545,6 +545,80 @@ async function run() {
       }
     });
 
+    // Get all purchases for admin
+    app.get("/api/admin/purchases", async (req, res) => {
+      try {
+        const allPurchases = await purchasesCollection
+          .find({})
+          .sort({ purchasedAt: -1 })
+          .toArray();
+
+        // Enrich with artwork data and buyer profiles
+        const enriched = await Promise.all(
+          allPurchases.map(async (p) => {
+            let artwork = null;
+            let buyerProfile = null;
+            try {
+              if (p.artworkId) {
+                artwork = await artworksCollection.findOne({
+                  _id: new ObjectId(p.artworkId),
+                });
+              }
+            } catch (e) {}
+            if (p.buyerEmail) {
+              buyerProfile = await profilesCollection.findOne({ email: p.buyerEmail });
+            }
+            return {
+              id: p.stripeSessionId || p._id.toString(),
+              buyerName: buyerProfile?.name || p.buyerEmail?.split('@')[0] || "Unknown",
+              buyerEmail: p.buyerEmail || "Unknown",
+              buyerAvatar: buyerProfile?.profileImage || null,
+              artworkTitle: artwork ? artwork.title : p.artworkTitle,
+              artistName: artwork ? (artwork.userName || artwork.artist) : "Unknown",
+              artistEmail: artwork ? artwork.email : "Unknown",
+              amount: p.amount,
+              date: new Date(p.purchasedAt).toLocaleDateString("en-US", { year: 'numeric', month: 'short', day: 'numeric' }),
+              status: "Completed",
+            };
+          }),
+        );
+        res.send(enriched);
+      } catch (error) {
+        console.error("Failed to fetch all purchases:", error);
+        res.status(500).send({ error: "Failed to fetch all purchases" });
+      }
+    });
+
+    // ── Subscriptions ──
+    const subscriptionsCollection = db.collection("subscriptions");
+
+    // Get all subscription "purchases" for admin
+    app.get("/api/admin/subscriptions", async (req, res) => {
+      try {
+        const subscriptionsData = await subscriptionsCollection.find().sort({ createdAt: -1 }).toArray();
+        
+        const enrichedSubscriptions = await Promise.all(
+          subscriptionsData.map(async (sub) => {
+            const resolvedEmail = sub.buyerEmail || sub.email || sub.customer_email || sub.customer_details?.email || sub.metadata?.buyerEmail || sub.userEmail || "Unknown";
+            const profile = await profilesCollection.findOne({ email: resolvedEmail });
+            return {
+              id: sub.transactionId || sub.stripeSessionId || sub.id || sub._id.toString(),
+              name: profile?.name || sub.buyerName || resolvedEmail.split('@')[0],
+              email: resolvedEmail,
+              type: "Subscription",
+              plan: sub.plan || sub.metadata?.plan || "Premium",
+              amount: sub.amount || (sub.amount_total ? sub.amount_total / 100 : null) || (sub.plan === "pro" ? 15 : 30),
+              date: new Date(sub.createdAt || sub.purchasedAt || (sub.created ? sub.created * 1000 : null) || parseInt(sub._id.toString().substring(0, 8), 16) * 1000).toLocaleDateString("en-US", { year: 'numeric', month: 'short', day: 'numeric' }),
+            };
+          })
+        );
+        res.send(enrichedSubscriptions);
+      } catch (error) {
+        console.error("Failed to fetch subscriptions:", error);
+        res.status(500).send({ error: "Failed to fetch subscriptions" });
+      }
+    });
+
     // Get sales for an artist
     app.get("/api/sales/:email", async (req, res) => {
       try {
