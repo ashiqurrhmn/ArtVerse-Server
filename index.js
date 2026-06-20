@@ -132,7 +132,23 @@ async function run() {
     // Get a user profile by email and fetch live profile data for their followers
     app.get("/api/profiles/:email", async (req, res) => {
       const email = req.params.email;
-      const result = await profilesCollection.findOne({ email });
+      let result = await profilesCollection.findOne({ email });
+
+      // Fetch user role from usersCollection to pass to frontend
+      const user = await db.collection("user").findOne({ email });
+      const role = user?.role || "user";
+
+      if (!result) {
+        result = { email, role };
+      } else {
+        result.role = role;
+      }
+
+      // Dynamically calculate actual sales (itemsSold) for this artist
+      const artistArtworks = await artworksCollection.find({ email }).toArray();
+      const artworkIds = artistArtworks.map(a => a._id.toString());
+      const salesCount = await purchasesCollection.countDocuments({ artworkId: { $in: artworkIds } });
+      result.itemsSold = salesCount;
 
       if (result && result.followers && result.followers.length > 0) {
         const followerEmails = result.followers.map((f) => f.email);
@@ -300,6 +316,58 @@ async function run() {
       }
     });
 
+    // Admin Stats Endpoint
+    app.get("/api/admin/stats", async (req, res) => {
+      try {
+        const totalUsers = await usersCollection.countDocuments();
+        const totalArtists = await usersCollection.countDocuments({ role: "artist" });
+        
+        const allPurchases = await db.collection("purchases").find().toArray();
+        const artworksSold = allPurchases.length;
+        const totalRevenue = allPurchases.reduce((acc, p) => acc + (p.amount || 0), 0);
+
+        // Group sales by month
+        const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+        const salesByMonth = {};
+        months.forEach(m => salesByMonth[m] = 0);
+        
+        allPurchases.forEach(p => {
+          if (p.purchasedAt) {
+            const date = new Date(p.purchasedAt);
+            const monthName = months[date.getMonth()];
+            salesByMonth[monthName] += (p.amount || 0);
+          }
+        });
+        
+        const salesData = months.map(name => ({ name, sales: salesByMonth[name] }));
+        
+        // Artworks by category
+        const allArtworks = await artworksCollection.find({}, { projection: { category: 1 } }).toArray();
+        const categoryCounts = {};
+        allArtworks.forEach(a => {
+          const cat = a.category || "Uncategorized";
+          categoryCounts[cat] = (categoryCounts[cat] || 0) + 1;
+        });
+        
+        const categoryData = Object.keys(categoryCounts).map(name => ({
+          name,
+          value: categoryCounts[name]
+        }));
+
+        res.send({
+          totalUsers,
+          totalArtists,
+          artworksSold,
+          totalRevenue,
+          salesData,
+          categoryData
+        });
+      } catch (error) {
+        console.error("Failed to fetch admin stats:", error);
+        res.status(500).send({ error: "Failed to fetch admin stats" });
+      }
+    });
+
     //stripe
     app.post("/create-checkout-session", async (req, res) => {
       try {
@@ -400,6 +468,8 @@ async function run() {
 
           await purchasesCollection.insertOne(purchase);
 
+          const artwork = await artworksCollection.findOne({ _id: new ObjectId(artworkId) });
+
           // Mark artwork as sold
           await artworksCollection.updateOne(
             { _id: new ObjectId(artworkId) },
@@ -411,6 +481,15 @@ async function run() {
               },
             },
           );
+
+          // Increment the artist's itemsSold in their profile
+          if (artwork && artwork.email) {
+            await profilesCollection.updateOne(
+              { email: artwork.email },
+              { $inc: { itemsSold: 1 } },
+              { upsert: true }
+            );
+          }
 
           return res.send({ success: true, purchase });
         }
@@ -463,6 +542,54 @@ async function run() {
         res.send(enriched);
       } catch (error) {
         res.status(500).send({ error: "Failed to fetch purchases" });
+      }
+    });
+
+    // Get sales for an artist
+    app.get("/api/sales/:email", async (req, res) => {
+      try {
+        const email = req.params.email;
+        if (!email) {
+          return res.status(400).send({ error: "Email is required" });
+        }
+        
+        // Find all artworks by this artist
+        const artistArtworks = await artworksCollection.find({ email }).toArray();
+        const artworkIds = artistArtworks.map(a => a._id.toString());
+        
+        // Find all purchases for these artworks
+        const sales = await purchasesCollection
+          .find({ artworkId: { $in: artworkIds } })
+          .sort({ purchasedAt: -1 })
+          .toArray();
+
+        // Enrich with buyer profile and formatting
+        const enriched = await Promise.all(
+          sales.map(async (sale) => {
+            const artwork = artistArtworks.find(a => a._id.toString() === sale.artworkId);
+            
+            // Get buyer profile
+            let buyerProfile = null;
+            if (sale.buyerEmail) {
+               buyerProfile = await profilesCollection.findOne({ email: sale.buyerEmail });
+            }
+            
+            return {
+              id: sale.stripeSessionId || sale._id.toString(),
+              title: artwork ? artwork.title : sale.artworkTitle,
+              buyerName: buyerProfile?.name || (sale.buyerEmail ? sale.buyerEmail.split('@')[0] : "Unknown"),
+              buyerEmail: sale.buyerEmail || "Unknown",
+              buyerAvatar: buyerProfile?.profileImage || null,
+              date: new Date(sale.purchasedAt).toLocaleDateString("en-US", { year: 'numeric', month: 'short', day: 'numeric' }),
+              amount: sale.amount,
+              status: "Completed",
+            };
+          })
+        );
+        res.send(enriched);
+      } catch (error) {
+        console.error("Failed to fetch sales:", error);
+        res.status(500).send({ error: "Failed to fetch sales" });
       }
     });
 
