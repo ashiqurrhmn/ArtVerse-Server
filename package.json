@@ -1,5 +1,5 @@
 {
-  "name": "wanderlus-server",
+  "name": "artverse-server",
   "version": "1.0.0",
   "description": "",
   "main": "index.js",
@@ -14,6 +14,7 @@
     "cors": "^2.8.6",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
+    "jose-cjs": "^6.2.3",
     "mongodb": "^7.2.0",
     "stripe": "^22.2.2"
   }

@@ -10,6 +10,7 @@ const app = express();
 const PORT = process.env.PORT;
 
 const Stripe = require("stripe");
+const { createRemoteJWKSet, jwtVerify } = require("jose-cjs");
 const stripe = Stripe(process.env.STRIPE_SECRET_KEY);
 
 app.use(
@@ -29,6 +30,29 @@ const client = new MongoClient(uri, {
   },
 });
 
+const JWKS = createRemoteJWKSet(
+  new URL(`${process.env.CLIENT_URL}/api/auth/jwks`),
+);
+
+const verifyToken = async (req, res, next) => {
+  const authHeader = req?.headers.authorization;
+  
+  if (!authHeader) {
+    return res.status(401).json({ message: "Unauthorized" });
+  }
+  const token = authHeader.split(" ")[1];
+  if (!token) {
+    return res.status(401).json({ message: "Unauthorized" });
+  }
+
+  try {
+    const { payload } = await jwtVerify(token, JWKS);
+    next();
+  } catch (err) {
+    return res.status(401).json({ message: "Unauthorized" });
+  }
+};
+
 async function run() {
   try {
     await client.connect();
@@ -37,14 +61,14 @@ async function run() {
     const artworksCollection = db.collection("artworks");
 
     // Create a new artwork
-    app.post("/api/artworks", async (req, res) => {
+    app.post("/api/artworks", verifyToken, async (req, res) => {
       const artwork = req.body;
       const result = await artworksCollection.insertOne(artwork);
       res.send(result);
     });
 
     // Get all artworks, optionally filtered by artist email. Includes artist's profile data.
-    app.get("/api/artworks", async (req, res) => {
+    app.get("/api/artworks",  async (req, res) => {
       const { email } = req.query;
       const matchStage = email ? { $match: { email } } : { $match: {} };
 
@@ -73,6 +97,41 @@ async function run() {
         ])
         .toArray();
       res.send(result);
+    });
+
+    // Get featured artworks (6 random published artworks)
+    app.get("/api/artworks/featured", async (req, res) => {
+      try {
+        const result = await artworksCollection
+          .aggregate([
+            { $match: { status: "Published" } },
+            { $sample: { size: 6 } },
+            {
+              $lookup: {
+                from: "profiles",
+                localField: "email",
+                foreignField: "email",
+                as: "artistProfile",
+              },
+            },
+            {
+              $addFields: {
+                userName: { $arrayElemAt: ["$artistProfile.name", 0] },
+                artistImage: { $arrayElemAt: ["$artistProfile.profileImage", 0] },
+              },
+            },
+            {
+              $project: {
+                artistProfile: 0,
+              },
+            },
+          ])
+          .toArray();
+        res.send(result);
+      } catch (error) {
+        console.error("Error fetching featured artworks:", error);
+        res.status(500).send({ message: "Internal server error" });
+      }
     });
 
     // Get a specific artwork by its ID. Includes artist's profile data.
@@ -107,7 +166,7 @@ async function run() {
     });
 
     // Delete a specific artwork by its ID
-    app.delete("/api/artworks/:id", async (req, res) => {
+    app.delete("/api/artworks/:id", verifyToken, async (req, res) => {
       const id = req.params.id;
       const query = { _id: new ObjectId(id) };
       const result = await artworksCollection.deleteOne(query);
@@ -115,7 +174,7 @@ async function run() {
     });
 
     // Partially update a specific artwork by its ID
-    app.patch("/api/artworks/:id", async (req, res) => {
+    app.patch("/api/artworks/:id", verifyToken, async (req, res) => {
       const id = req.params.id;
       const query = { _id: new ObjectId(id) };
       const updatedArtwork = req.body;
@@ -146,8 +205,10 @@ async function run() {
 
       // Dynamically calculate actual sales (itemsSold) for this artist
       const artistArtworks = await artworksCollection.find({ email }).toArray();
-      const artworkIds = artistArtworks.map(a => a._id.toString());
-      const salesCount = await purchasesCollection.countDocuments({ artworkId: { $in: artworkIds } });
+      const artworkIds = artistArtworks.map((a) => a._id.toString());
+      const salesCount = await purchasesCollection.countDocuments({
+        artworkId: { $in: artworkIds },
+      });
       result.itemsSold = salesCount;
 
       if (result && result.followers && result.followers.length > 0) {
@@ -186,16 +247,14 @@ async function run() {
 
       // If name is updated, also update it in the user collection
       if (profileData.name) {
-        await db.collection("user").updateOne(
-          { email },
-          { $set: { name: profileData.name } }
-        );
-        
+        await db
+          .collection("user")
+          .updateOne({ email }, { $set: { name: profileData.name } });
+
         // Also update the artist's name in their artworks
-        await db.collection("artworks").updateMany(
-          { email },
-          { $set: { userName: profileData.name } }
-        );
+        await db
+          .collection("artworks")
+          .updateMany({ email }, { $set: { userName: profileData.name } });
       }
 
       res.send(result);
@@ -243,7 +302,7 @@ async function run() {
     const usersCollection = db.collection("user");
 
     // Get all users
-    app.get("/api/users", async (req, res) => {
+    app.get("/api/users", verifyToken, async (req, res) => {
       try {
         const result = await usersCollection
           .aggregate([
@@ -277,7 +336,7 @@ async function run() {
     });
 
     // Update user role
-    app.patch("/api/users/:id/role", async (req, res) => {
+    app.patch("/api/users/:id/role", verifyToken, async (req, res) => {
       const id = req.params.id;
       const { role } = req.body;
 
@@ -302,7 +361,7 @@ async function run() {
     });
 
     // Delete a user
-    app.delete("/api/users/:id", async (req, res) => {
+    app.delete("/api/users/:id", verifyToken, async (req, res) => {
       const id = req.params.id;
 
       try {
@@ -317,41 +376,64 @@ async function run() {
     });
 
     // Admin Stats Endpoint
-    app.get("/api/admin/stats", async (req, res) => {
+    app.get("/api/admin/stats", verifyToken, async (req, res) => {
       try {
         const totalUsers = await usersCollection.countDocuments();
-        const totalArtists = await usersCollection.countDocuments({ role: "artist" });
-        
+        const totalArtists = await usersCollection.countDocuments({
+          role: "artist",
+        });
+
         const allPurchases = await db.collection("purchases").find().toArray();
         const artworksSold = allPurchases.length;
-        const totalRevenue = allPurchases.reduce((acc, p) => acc + (p.amount || 0), 0);
+        const totalRevenue = allPurchases.reduce(
+          (acc, p) => acc + (p.amount || 0),
+          0,
+        );
 
         // Group sales by month
-        const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+        const months = [
+          "Jan",
+          "Feb",
+          "Mar",
+          "Apr",
+          "May",
+          "Jun",
+          "Jul",
+          "Aug",
+          "Sep",
+          "Oct",
+          "Nov",
+          "Dec",
+        ];
         const salesByMonth = {};
-        months.forEach(m => salesByMonth[m] = 0);
-        
-        allPurchases.forEach(p => {
+        months.forEach((m) => (salesByMonth[m] = 0));
+
+        allPurchases.forEach((p) => {
           if (p.purchasedAt) {
             const date = new Date(p.purchasedAt);
             const monthName = months[date.getMonth()];
-            salesByMonth[monthName] += (p.amount || 0);
+            salesByMonth[monthName] += p.amount || 0;
           }
         });
-        
-        const salesData = months.map(name => ({ name, sales: salesByMonth[name] }));
-        
+
+        const salesData = months.map((name) => ({
+          name,
+          sales: salesByMonth[name],
+        }));
+
         // Artworks by category
-        const allArtworks = await artworksCollection.find({}, { projection: { category: 1 } }).toArray();
+        const allArtworks = await artworksCollection
+          .find({}, { projection: { category: 1 } })
+          .toArray();
         const categoryCounts = {};
-        allArtworks.forEach(a => {
+        allArtworks.forEach((a) => {
           const cat = a.category || "Uncategorized";
           categoryCounts[cat] = (categoryCounts[cat] || 0) + 1;
         });
-        
-        const categoryData = Object.keys(categoryCounts).map(name => ({
+
+        const categoryData = Object.keys(categoryCounts).map((name) => ({
           name,
-          value: categoryCounts[name]
+          value: categoryCounts[name],
         }));
 
         res.send({
@@ -360,7 +442,7 @@ async function run() {
           artworksSold,
           totalRevenue,
           salesData,
-          categoryData
+          categoryData,
         });
       } catch (error) {
         console.error("Failed to fetch admin stats:", error);
@@ -374,15 +456,25 @@ async function run() {
         const { title, image, price, _id, buyerEmail } = req.body;
 
         if (buyerEmail) {
-          const buyer = await db.collection("user").findOne({ email: buyerEmail });
+          const buyer = await db
+            .collection("user")
+            .findOne({ email: buyerEmail });
           const plan = buyer?.plan || "free";
-          const purchaseCount = await db.collection("purchases").countDocuments({ buyerEmail });
+          const purchaseCount = await db
+            .collection("purchases")
+            .countDocuments({ buyerEmail });
 
           if (plan === "free" && purchaseCount >= 3) {
-            return res.status(403).send({ error: "Free plan allows max 3 artwork purchases. Please upgrade to Pro." });
+            return res.status(403).send({
+              error:
+                "Free plan allows max 3 artwork purchases. Please upgrade to Pro.",
+            });
           }
           if (plan === "pro" && purchaseCount >= 9) {
-            return res.status(403).send({ error: "Pro plan allows max 9 artwork purchases. Please upgrade to Premium." });
+            return res.status(403).send({
+              error:
+                "Pro plan allows max 9 artwork purchases. Please upgrade to Premium.",
+            });
           }
         }
 
@@ -468,7 +560,9 @@ async function run() {
 
           await purchasesCollection.insertOne(purchase);
 
-          const artwork = await artworksCollection.findOne({ _id: new ObjectId(artworkId) });
+          const artwork = await artworksCollection.findOne({
+            _id: new ObjectId(artworkId),
+          });
 
           // Mark artwork as sold
           await artworksCollection.updateOne(
@@ -487,7 +581,7 @@ async function run() {
             await profilesCollection.updateOne(
               { email: artwork.email },
               { $inc: { itemsSold: 1 } },
-              { upsert: true }
+              { upsert: true },
             );
           }
 
@@ -502,7 +596,7 @@ async function run() {
     });
 
     // Get purchases for a buyer
-    app.get("/api/purchases", async (req, res) => {
+    app.get("/api/purchases", verifyToken, async (req, res) => {
       try {
         const { email } = req.query;
         if (!email) {
@@ -546,7 +640,7 @@ async function run() {
     });
 
     // Get all purchases for admin
-    app.get("/api/admin/purchases", async (req, res) => {
+    app.get("/api/admin/purchases", verifyToken, async (req, res) => {
       try {
         const allPurchases = await purchasesCollection
           .find({})
@@ -566,18 +660,27 @@ async function run() {
               }
             } catch (e) {}
             if (p.buyerEmail) {
-              buyerProfile = await profilesCollection.findOne({ email: p.buyerEmail });
+              buyerProfile = await profilesCollection.findOne({
+                email: p.buyerEmail,
+              });
             }
             return {
               id: p.stripeSessionId || p._id.toString(),
-              buyerName: buyerProfile?.name || p.buyerEmail?.split('@')[0] || "Unknown",
+              buyerName:
+                buyerProfile?.name || p.buyerEmail?.split("@")[0] || "Unknown",
               buyerEmail: p.buyerEmail || "Unknown",
               buyerAvatar: buyerProfile?.profileImage || null,
               artworkTitle: artwork ? artwork.title : p.artworkTitle,
-              artistName: artwork ? (artwork.userName || artwork.artist) : "Unknown",
+              artistName: artwork
+                ? artwork.userName || artwork.artist
+                : "Unknown",
               artistEmail: artwork ? artwork.email : "Unknown",
               amount: p.amount,
-              date: new Date(p.purchasedAt).toLocaleDateString("en-US", { year: 'numeric', month: 'short', day: 'numeric' }),
+              date: new Date(p.purchasedAt).toLocaleDateString("en-US", {
+                year: "numeric",
+                month: "short",
+                day: "numeric",
+              }),
               status: "Completed",
             };
           }),
@@ -593,24 +696,53 @@ async function run() {
     const subscriptionsCollection = db.collection("subscriptions");
 
     // Get all subscription "purchases" for admin
-    app.get("/api/admin/subscriptions", async (req, res) => {
+    app.get("/api/admin/subscriptions", verifyToken, async (req, res) => {
       try {
-        const subscriptionsData = await subscriptionsCollection.find().sort({ createdAt: -1 }).toArray();
-        
+        const subscriptionsData = await subscriptionsCollection
+          .find()
+          .sort({ createdAt: -1 })
+          .toArray();
+
         const enrichedSubscriptions = await Promise.all(
           subscriptionsData.map(async (sub) => {
-            const resolvedEmail = sub.buyerEmail || sub.email || sub.customer_email || sub.customer_details?.email || sub.metadata?.buyerEmail || sub.userEmail || "Unknown";
-            const profile = await profilesCollection.findOne({ email: resolvedEmail });
+            const resolvedEmail =
+              sub.buyerEmail ||
+              sub.email ||
+              sub.customer_email ||
+              sub.customer_details?.email ||
+              sub.metadata?.buyerEmail ||
+              sub.userEmail ||
+              "Unknown";
+            const profile = await profilesCollection.findOne({
+              email: resolvedEmail,
+            });
             return {
-              id: sub.transactionId || sub.stripeSessionId || sub.id || sub._id.toString(),
-              name: profile?.name || sub.buyerName || resolvedEmail.split('@')[0],
+              id:
+                sub.transactionId ||
+                sub.stripeSessionId ||
+                sub.id ||
+                sub._id.toString(),
+              name:
+                profile?.name || sub.buyerName || resolvedEmail.split("@")[0],
               email: resolvedEmail,
               type: "Subscription",
               plan: sub.plan || sub.metadata?.plan || "Premium",
-              amount: sub.amount || (sub.amount_total ? sub.amount_total / 100 : null) || (sub.plan === "pro" ? 15 : 30),
-              date: new Date(sub.createdAt || sub.purchasedAt || (sub.created ? sub.created * 1000 : null) || parseInt(sub._id.toString().substring(0, 8), 16) * 1000).toLocaleDateString("en-US", { year: 'numeric', month: 'short', day: 'numeric' }),
+              amount:
+                sub.amount ||
+                (sub.amount_total ? sub.amount_total / 100 : null) ||
+                (sub.plan === "pro" ? 15 : 30),
+              date: new Date(
+                sub.createdAt ||
+                  sub.purchasedAt ||
+                  (sub.created ? sub.created * 1000 : null) ||
+                  parseInt(sub._id.toString().substring(0, 8), 16) * 1000,
+              ).toLocaleDateString("en-US", {
+                year: "numeric",
+                month: "short",
+                day: "numeric",
+              }),
             };
-          })
+          }),
         );
         res.send(enrichedSubscriptions);
       } catch (error) {
@@ -620,17 +752,19 @@ async function run() {
     });
 
     // Get sales for an artist
-    app.get("/api/sales/:email", async (req, res) => {
+    app.get("/api/sales/:email", verifyToken, async (req, res) => {
       try {
         const email = req.params.email;
         if (!email) {
           return res.status(400).send({ error: "Email is required" });
         }
-        
+
         // Find all artworks by this artist
-        const artistArtworks = await artworksCollection.find({ email }).toArray();
-        const artworkIds = artistArtworks.map(a => a._id.toString());
-        
+        const artistArtworks = await artworksCollection
+          .find({ email })
+          .toArray();
+        const artworkIds = artistArtworks.map((a) => a._id.toString());
+
         // Find all purchases for these artworks
         const sales = await purchasesCollection
           .find({ artworkId: { $in: artworkIds } })
@@ -640,25 +774,35 @@ async function run() {
         // Enrich with buyer profile and formatting
         const enriched = await Promise.all(
           sales.map(async (sale) => {
-            const artwork = artistArtworks.find(a => a._id.toString() === sale.artworkId);
-            
+            const artwork = artistArtworks.find(
+              (a) => a._id.toString() === sale.artworkId,
+            );
+
             // Get buyer profile
             let buyerProfile = null;
             if (sale.buyerEmail) {
-               buyerProfile = await profilesCollection.findOne({ email: sale.buyerEmail });
+              buyerProfile = await profilesCollection.findOne({
+                email: sale.buyerEmail,
+              });
             }
-            
+
             return {
               id: sale.stripeSessionId || sale._id.toString(),
               title: artwork ? artwork.title : sale.artworkTitle,
-              buyerName: buyerProfile?.name || (sale.buyerEmail ? sale.buyerEmail.split('@')[0] : "Unknown"),
+              buyerName:
+                buyerProfile?.name ||
+                (sale.buyerEmail ? sale.buyerEmail.split("@")[0] : "Unknown"),
               buyerEmail: sale.buyerEmail || "Unknown",
               buyerAvatar: buyerProfile?.profileImage || null,
-              date: new Date(sale.purchasedAt).toLocaleDateString("en-US", { year: 'numeric', month: 'short', day: 'numeric' }),
+              date: new Date(sale.purchasedAt).toLocaleDateString("en-US", {
+                year: "numeric",
+                month: "short",
+                day: "numeric",
+              }),
               amount: sale.amount,
               status: "Completed",
             };
-          })
+          }),
         );
         res.send(enriched);
       } catch (error) {
@@ -692,8 +836,10 @@ async function run() {
         }
         const buyer = await usersCollection.findOne({ email });
         const plan = buyer?.plan || "free";
-        const count = await purchasesCollection.countDocuments({ buyerEmail: email });
-        
+        const count = await purchasesCollection.countDocuments({
+          buyerEmail: email,
+        });
+
         let limit = 3;
         if (plan === "pro") limit = 9;
         if (plan === "premium") limit = -1; // unlimited
@@ -707,56 +853,72 @@ async function run() {
     // ── Saved Artworks ──
     const savedArtworksCollection = db.collection("savedArtworks");
 
-    // Toggle saved state of an artwork
-    app.post("/api/saved-artworks/toggle", async (req, res) => {
+    // Toggle save/unsave artwork
+    app.post("/api/saved-artworks/toggle", verifyToken, async (req, res) => {
+      const { email, artworkId } = req.body;
+      
       try {
-        const { email, artworkId } = req.body;
-        if (!email || !artworkId) {
-          return res.status(400).send({ error: "Email and artworkId are required" });
-        }
+        const query = { email, artworkId: new ObjectId(artworkId) };
+        const existing = await savedArtworksCollection.findOne(query);
 
-        const existing = await savedArtworksCollection.findOne({ email, artworkId });
         if (existing) {
-          await savedArtworksCollection.deleteOne({ _id: existing._id });
+          // Unsave
+          await savedArtworksCollection.deleteOne(query);
           res.send({ saved: false });
         } else {
-          await savedArtworksCollection.insertOne({ email, artworkId, savedAt: new Date() });
+          // Save
+          await savedArtworksCollection.insertOne({
+            email,
+            artworkId: new ObjectId(artworkId),
+            savedAt: new Date(),
+          });
           res.send({ saved: true });
         }
       } catch (error) {
-        res.status(500).send({ error: "Failed to toggle saved artwork" });
+        console.error("Error toggling save:", error);
+        res.status(500).send({ message: "Internal server error" });
       }
     });
 
-    // Check if a specific artwork is saved by user
+    // Check if an artwork is saved by a user
     app.get("/api/saved-artworks/check/:email/:artworkId", async (req, res) => {
+      const { email, artworkId } = req.params;
+      
       try {
-        const { email, artworkId } = req.params;
-        const existing = await savedArtworksCollection.findOne({ email, artworkId });
+        const existing = await savedArtworksCollection.findOne({
+          email,
+          artworkId: new ObjectId(artworkId),
+        });
         res.send({ saved: !!existing });
       } catch (error) {
-        res.status(500).send({ error: "Failed to check saved status" });
+        console.error("Error checking saved status:", error);
+        res.status(500).send({ message: "Internal server error" });
       }
     });
 
-    // Get all saved artworks for a user
-    app.get("/api/saved-artworks/:email", async (req, res) => {
+    // Get all saved artworks for a user (with details)
+    app.get("/api/saved-artworks/:email", verifyToken, async (req, res) => {
       try {
         const { email } = req.params;
-        const savedItems = await savedArtworksCollection.find({ email }).sort({ savedAt: -1 }).toArray();
+        const savedItems = await savedArtworksCollection
+          .find({ email })
+          .sort({ savedAt: -1 })
+          .toArray();
 
         const enriched = await Promise.all(
           savedItems.map(async (item) => {
             let artwork = null;
             try {
-              artwork = await artworksCollection.findOne({ _id: new ObjectId(item.artworkId) });
+              artwork = await artworksCollection.findOne({
+                _id: new ObjectId(item.artworkId),
+              });
             } catch (e) {}
             return artwork;
-          })
+          }),
         );
-        
+
         // filter out nulls in case an artwork was deleted
-        res.send(enriched.filter(a => a !== null));
+        res.send(enriched.filter((a) => a !== null));
       } catch (error) {
         res.status(500).send({ error: "Failed to fetch saved artworks" });
       }
@@ -777,8 +939,12 @@ async function run() {
         // Enrich with profile data
         const enriched = await Promise.all(
           comments.map(async (comment) => {
-            const profile = await profilesCollection.findOne({ email: comment.userId });
-            const userDoc = await usersCollection.findOne({ email: comment.userId });
+            const profile = await profilesCollection.findOne({
+              email: comment.userId,
+            });
+            const userDoc = await usersCollection.findOne({
+              email: comment.userId,
+            });
             return {
               _id: comment._id,
               artworkId: comment.artworkId,
@@ -786,10 +952,11 @@ async function run() {
               comment: comment.comment,
               createdAt: comment.createdAt,
               updatedAt: comment.updatedAt || null,
-              userName: profile?.name || userDoc?.name || comment.userId.split("@")[0],
+              userName:
+                profile?.name || userDoc?.name || comment.userId.split("@")[0],
               userAvatar: profile?.profileImage || userDoc?.image || null,
             };
-          })
+          }),
         );
         res.send(enriched);
       } catch (error) {
@@ -805,7 +972,9 @@ async function run() {
         const { email, comment } = req.body;
 
         if (!email || !comment || !comment.trim()) {
-          return res.status(400).send({ error: "Email and comment are required" });
+          return res
+            .status(400)
+            .send({ error: "Email and comment are required" });
         }
 
         const newComment = {
@@ -839,20 +1008,26 @@ async function run() {
         const { email, comment } = req.body;
 
         if (!email || !comment || !comment.trim()) {
-          return res.status(400).send({ error: "Email and comment are required" });
+          return res
+            .status(400)
+            .send({ error: "Email and comment are required" });
         }
 
-        const existing = await commentsCollection.findOne({ _id: new ObjectId(commentId) });
+        const existing = await commentsCollection.findOne({
+          _id: new ObjectId(commentId),
+        });
         if (!existing) {
           return res.status(404).send({ error: "Comment not found" });
         }
         if (existing.userId !== email) {
-          return res.status(403).send({ error: "You can only edit your own comments" });
+          return res
+            .status(403)
+            .send({ error: "You can only edit your own comments" });
         }
 
         await commentsCollection.updateOne(
           { _id: new ObjectId(commentId) },
-          { $set: { comment: comment.trim(), updatedAt: new Date() } }
+          { $set: { comment: comment.trim(), updatedAt: new Date() } },
         );
 
         res.send({ success: true });
@@ -872,12 +1047,16 @@ async function run() {
           return res.status(400).send({ error: "Email is required" });
         }
 
-        const existing = await commentsCollection.findOne({ _id: new ObjectId(commentId) });
+        const existing = await commentsCollection.findOne({
+          _id: new ObjectId(commentId),
+        });
         if (!existing) {
           return res.status(404).send({ error: "Comment not found" });
         }
         if (existing.userId !== email) {
-          return res.status(403).send({ error: "You can only delete your own comments" });
+          return res
+            .status(403)
+            .send({ error: "You can only delete your own comments" });
         }
 
         await commentsCollection.deleteOne({ _id: new ObjectId(commentId) });
