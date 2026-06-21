@@ -84,14 +84,35 @@ async function run() {
             },
           },
           {
+            $lookup: {
+              from: "user",
+              localField: "email",
+              foreignField: "email",
+              as: "artistUser",
+            },
+          },
+          {
             $addFields: {
-              userName: { $arrayElemAt: ["$artistProfile.name", 0] },
-              artistImage: { $arrayElemAt: ["$artistProfile.profileImage", 0] },
+              userName: {
+                $ifNull: [
+                  { $arrayElemAt: ["$artistProfile.name", 0] },
+                  { $arrayElemAt: ["$artistUser.name", 0] },
+                  "$userName",
+                ],
+              },
+              artistImage: {
+                $ifNull: [
+                  { $arrayElemAt: ["$artistProfile.profileImage", 0] },
+                  { $arrayElemAt: ["$artistUser.image", 0] },
+                  "$artistImage",
+                ],
+              },
             },
           },
           {
             $project: {
               artistProfile: 0,
+              artistUser: 0,
             },
           },
         ])
@@ -115,14 +136,35 @@ async function run() {
               },
             },
             {
+              $lookup: {
+                from: "user",
+                localField: "email",
+                foreignField: "email",
+                as: "artistUser",
+              },
+            },
+            {
               $addFields: {
-                userName: { $arrayElemAt: ["$artistProfile.name", 0] },
-                artistImage: { $arrayElemAt: ["$artistProfile.profileImage", 0] },
+                userName: {
+                  $ifNull: [
+                    { $arrayElemAt: ["$artistProfile.name", 0] },
+                    { $arrayElemAt: ["$artistUser.name", 0] },
+                    "$userName",
+                  ],
+                },
+                artistImage: {
+                  $ifNull: [
+                    { $arrayElemAt: ["$artistProfile.profileImage", 0] },
+                    { $arrayElemAt: ["$artistUser.image", 0] },
+                    "$artistImage",
+                  ],
+                },
               },
             },
             {
               $project: {
                 artistProfile: 0,
+                artistUser: 0,
               },
             },
           ])
@@ -150,14 +192,35 @@ async function run() {
             },
           },
           {
+            $lookup: {
+              from: "user",
+              localField: "email",
+              foreignField: "email",
+              as: "artistUser",
+            },
+          },
+          {
             $addFields: {
-              userName: { $arrayElemAt: ["$artistProfile.name", 0] },
-              artistImage: { $arrayElemAt: ["$artistProfile.profileImage", 0] },
+              userName: {
+                $ifNull: [
+                  { $arrayElemAt: ["$artistProfile.name", 0] },
+                  { $arrayElemAt: ["$artistUser.name", 0] },
+                  "$userName",
+                ],
+              },
+              artistImage: {
+                $ifNull: [
+                  { $arrayElemAt: ["$artistProfile.profileImage", 0] },
+                  { $arrayElemAt: ["$artistUser.image", 0] },
+                  "$artistImage",
+                ],
+              },
             },
           },
           {
             $project: {
               artistProfile: 0,
+              artistUser: 0,
             },
           },
         ])
@@ -198,9 +261,16 @@ async function run() {
       const role = user?.role || "user";
 
       if (!result) {
-        result = { email, role };
+        result = { 
+          email, 
+          role,
+          name: user?.name || "",
+          profileImage: user?.image || ""
+        };
       } else {
         result.role = role;
+        if (!result.name && user?.name) result.name = user.name;
+        if (!result.profileImage && user?.image) result.profileImage = user.image;
       }
 
       // Dynamically calculate actual sales (itemsSold) for this artist
@@ -233,6 +303,52 @@ async function run() {
       }
 
       res.send(result || {});
+    });
+
+    // Get Top Artists based on sales (fallback to most artworks if no sales)
+    app.get("/api/top-artists", async (req, res) => {
+      try {
+        const topArtists = await artworksCollection.aggregate([
+          { $match: { sold: true } },
+          { $group: { _id: "$email", sales: { $sum: 1 } } },
+          { $sort: { sales: -1 } },
+          { $limit: 3 }
+        ]).toArray();
+
+        let artistEmails = topArtists.map(a => a._id).filter(e => e);
+        
+        if (artistEmails.length < 3) {
+          const moreArtists = await artworksCollection.aggregate([
+            { $match: { email: { $exists: true, $ne: "" } } },
+            { $group: { _id: "$email", count: { $sum: 1 } } },
+            { $sort: { count: -1 } },
+            { $limit: 5 }
+          ]).toArray();
+          
+          artistEmails = [...new Set([...artistEmails, ...moreArtists.map(a => a._id)])].slice(0, 3);
+        }
+
+        const profiles = await profilesCollection.find({ email: { $in: artistEmails } }).toArray();
+        const users = await db.collection("user").find({ email: { $in: artistEmails } }).toArray();
+        
+        const result = artistEmails.map(email => {
+          const profile = profiles.find(p => p.email === email);
+          const userDoc = users.find(u => u.email === email);
+          const topStats = topArtists.find(a => a._id === email);
+          
+          return {
+            email,
+            name: profile?.name || userDoc?.name || "Artist",
+            avatar: profile?.profileImage || userDoc?.image || "",
+            coverImage: profile?.coverImage || "",
+            sales: topStats ? topStats.sales : 0
+          };
+        });
+
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ error: "Failed to fetch top artists" });
+      }
     });
 
     // Create or update a user profile by email (upsert operation)
@@ -778,12 +894,14 @@ async function run() {
               (a) => a._id.toString() === sale.artworkId,
             );
 
-            // Get buyer profile
+            // Get buyer profile and user account
             let buyerProfile = null;
+            let buyerUser = null;
             if (sale.buyerEmail) {
-              buyerProfile = await profilesCollection.findOne({
-                email: sale.buyerEmail,
-              });
+              [buyerProfile, buyerUser] = await Promise.all([
+                profilesCollection.findOne({ email: sale.buyerEmail }),
+                usersCollection.findOne({ email: sale.buyerEmail }),
+              ]);
             }
 
             return {
@@ -791,9 +909,10 @@ async function run() {
               title: artwork ? artwork.title : sale.artworkTitle,
               buyerName:
                 buyerProfile?.name ||
+                buyerUser?.name ||
                 (sale.buyerEmail ? sale.buyerEmail.split("@")[0] : "Unknown"),
               buyerEmail: sale.buyerEmail || "Unknown",
-              buyerAvatar: buyerProfile?.profileImage || null,
+              buyerAvatar: buyerProfile?.profileImage || buyerUser?.image || null,
               date: new Date(sale.purchasedAt).toLocaleDateString("en-US", {
                 year: "numeric",
                 month: "short",
